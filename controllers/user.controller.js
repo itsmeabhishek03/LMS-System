@@ -133,6 +133,10 @@ export const changeUserPassword = catchAsync(async (req, res) => {
 
   user.password = newPassword;
   await user.save();
+  res.status(200).json({
+    success: true,
+    message: "Password changed successfully",
+  });
 });
 
 /**
@@ -149,22 +153,54 @@ export const forgotPassword = catchAsync(async (req, res) => {
   }
   
   // Generate reset token
-  const resetToken = crypto.randomBytes(32).toString("hex");
-  user.passwordResetToken = crypto
-    .createHash("sha256")
-    .update(resetToken)
-    .digest("hex");
-  user.passwordResetExpires = Date.now() + 10 * 60 * 1000; // 10 minutes
+  const resetToken = user.getResetPasswordToken();
   await user.save({ validateBeforeSave: false });
+  res.status(200).json({ message: "Reset link sent to email" });
 });
 
 /**
  * Reset password
  * @route POST /api/v1/users/reset-password/:token
  */
-// export const resetPassword = catchAsync(async (req, res) => {
-//   // TODO: Implement reset password functionality
-// });
+export const resetPassword = catchAsync(async (req, res) => {
+  const { password } = req.body;
+
+  if (!password) {
+    throw new AppError("Please provide a new password", 400);
+  }
+
+  // 1. Hash the token from URL
+  const hashedToken = crypto
+    .createHash("sha256")
+    .update(req.params.token)
+    .digest("hex");
+
+  // 2. Find user with valid token and not expired
+  const user = await User.findOne({
+    resetPasswordToken: hashedToken,
+    resetPasswordExpire: { $gt: Date.now() }
+  });
+
+  if (!user) {
+    throw new AppError("Token is invalid or has expired", 400);
+  }
+
+  // 3. Set new password
+  user.password = password;
+
+  // 4. Clear reset fields
+  user.resetPasswordToken = undefined;
+  user.resetPasswordExpire = undefined;
+
+  // 5. Save user (triggers password hashing)
+  await user.save();
+
+  res.status(200).json({
+    success: true,
+    message: "Password has been reset successfully"
+  });
+});
+
 
 /**
  * Delete user account

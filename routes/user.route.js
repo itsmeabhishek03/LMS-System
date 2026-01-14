@@ -15,7 +15,7 @@ import { validateSignup, validateSignin, validatePasswordChange } from "../middl
 const router = express.Router();
 
 // Auth routes
-router.post("/signup", validateSignup, createUserAccount);
+router.post("/signup", createUserAccount);
 router.post("/signin", validateSignin, authenticateUser);
 router.post("/signout", signOutUser);
 
