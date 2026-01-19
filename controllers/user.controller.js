@@ -11,26 +11,25 @@ import crypto from "crypto";
  * @route POST /api/v1/users/signup
  */
 export const createUserAccount = catchAsync(async (req, res) => {
-  // TODO: Implement create user account functionality
-  const { name, email, password, role='student' } = req.body;
-   
-  if(!name || !email || !password) {
-    throw new AppError("Name, email and password are required", 400);
-  }
-  const existingUser = await User.findOne({ email });
+  const { name, email, password, role = "student" } = req.body;
+
+  // Check if user already exists
+  const existingUser = await User.findOne({ email: email.toLowerCase() });
   if (existingUser) {
-    throw new AppError("User with this email already exists", 400);
+    throw new AppError("User already exists with this email", 400);
   }
-  
+
+  // Create user (password hashing is handled by the model)
   const user = await User.create({
     name,
-    email,
+    email: email.toLowerCase(),
     password,
-    role
+    role,
   });
 
+  // Update last active and generate token
   await user.updateLastActive();
-  generateToken(res, user, "User created successfully");
+  generateToken(res, user, "Account created successfully");
 });
 
 /**
@@ -38,21 +37,19 @@ export const createUserAccount = catchAsync(async (req, res) => {
  * @route POST /api/v1/users/signin
  */
 export const authenticateUser = catchAsync(async (req, res) => {
-  // TODO: Implement user authentication functionality
   const { email, password } = req.body;
-  
-  if (!email || !password) {
-    throw new AppError("Email and password are required", 400);
-  }
 
-  const user = await User.findOne({ email }).select("+password");
-
+  // Find user and check password
+  const user = await User.findOne({ email: email.toLowerCase() }).select(
+    "+password"
+  );
   if (!user || !(await user.comparePassword(password))) {
     throw new AppError("Invalid email or password", 401);
   }
 
+  // Update last active and generate token
   await user.updateLastActive();
-  generateToken(res, user, "User authenticated successfully");
+  generateToken(res, user, `Welcome back ${user.name}`);
 });
 
 /**
@@ -60,15 +57,10 @@ export const authenticateUser = catchAsync(async (req, res) => {
  * @route POST /api/v1/users/signout
  */
 export const signOutUser = catchAsync(async (_, res) => {
-  // TODO: Implement sign out functionality
-  res.cookie("token", "", {
-    httpOnly: true,
-    expires: new Date(0),
-  });
-
+  res.cookie("token", "", { maxAge: 0 });
   res.status(200).json({
     success: true,
-    message: "User signed out successfully",
+    message: "Signed out successfully",
   });
 });
 
@@ -77,12 +69,26 @@ export const signOutUser = catchAsync(async (_, res) => {
  * @route GET /api/v1/users/profile
  */
 export const getCurrentUserProfile = catchAsync(async (req, res) => {
-  // TODO: Implement get current user profile functionality
-  const user = await User.findById(req.id);
+  const user = await User.findById(req.id)
+    .populate({
+      path: "enrolledCourses.course",
+      select: "title description thumbnail",
+    })
+    .populate({
+      path: "createdCourses",
+      select: "title thumbnail enrolledStudents",
+    });
+
+  if (!user) {
+    throw new AppError("User not found", 404);
+  }
 
   res.status(200).json({
     success: true,
-    data: user,
+    data: {
+      ...user.toJSON(),
+      totalEnrolledCourses: user.totalEnrolledCourses,
+    },
   });
 });
 
@@ -91,30 +97,35 @@ export const getCurrentUserProfile = catchAsync(async (req, res) => {
  * @route PATCH /api/v1/users/profile
  */
 export const updateUserProfile = catchAsync(async (req, res) => {
-  // TODO: Implement update user profile functionality
-  const user = await User.findById(req.id);
+  const { name, email, bio } = req.body;
+  const updateData = { name, email: email?.toLowerCase(), bio };
 
-  const { name, email, avatar , bio } = req.body;
-  if (name) user.name = name;
-  if (email) user.email = email;
-  if (bio) user.bio = bio;
+  // Handle avatar upload if provided
+  if (req.file) {
+    const avatarResult = await uploadMedia(req.file.path);
+    updateData.avatar = avatarResult?.secure_url || req.file.path;
 
-  if (avatar) {
-    // Delete existing avatar from Cloudinary if not default
+    // Delete old avatar if it's not the default
+    const user = await User.findById(req.id);
     if (user.avatar && user.avatar !== "default-avatar.png") {
       await deleteMediaFromCloudinary(user.avatar);
     }
-    // Upload new avatar to Cloudinary
-    const uploadedAvatar = await uploadMedia(avatar, "avatars");
-    user.avatar = uploadedAvatar.secure_url;
   }
 
-  await user.save();
+  // Update user and get updated document
+  const updatedUser = await User.findByIdAndUpdate(req.id, updateData, {
+    new: true,
+    runValidators: true,
+  });
+
+  if (!updatedUser) {
+    throw new AppError("User not found", 404);
+  }
 
   res.status(200).json({
     success: true,
-    data: user,
-    message: "User profile updated successfully",
+    message: "Profile updated successfully",
+    data: updatedUser,
   });
 });
 
@@ -123,16 +134,23 @@ export const updateUserProfile = catchAsync(async (req, res) => {
  * @route PATCH /api/v1/users/password
  */
 export const changeUserPassword = catchAsync(async (req, res) => {
-  // TODO: Implement change user password functionality
   const { currentPassword, newPassword } = req.body;
-  const user = await User.findById(req.id).select("+password");
 
-  if (!user || !(await user.comparePassword(currentPassword))) {
+  // Get user with password
+  const user = await User.findById(req.id).select("+password");
+  if (!user) {
+    throw new AppError("User not found", 404);
+  }
+
+  // Verify current password
+  if (!(await user.comparePassword(currentPassword))) {
     throw new AppError("Current password is incorrect", 401);
   }
 
+  // Update password
   user.password = newPassword;
   await user.save();
+
   res.status(200).json({
     success: true,
     message: "Password changed successfully",
@@ -144,18 +162,23 @@ export const changeUserPassword = catchAsync(async (req, res) => {
  * @route POST /api/v1/users/forgot-password
  */
 export const forgotPassword = catchAsync(async (req, res) => {
-  // TODO: Implement forgot password functionality
   const { email } = req.body;
-  const user = await User.findOne({ email });
+  const user = await User.findOne({ email: email.toLowerCase() });
 
   if (!user) {
-    throw new AppError("There is no user with that email address", 404);
+    throw new AppError("No user found with this email", 404);
   }
-  
+
   // Generate reset token
   const resetToken = user.getResetPasswordToken();
   await user.save({ validateBeforeSave: false });
-  res.status(200).json({ message: "Reset link sent to email" });
+
+  // TODO: Send reset token via email
+
+  res.status(200).json({
+    success: true,
+    message: "Password reset instructions sent to email",
+  });
 });
 
 /**
@@ -163,59 +186,49 @@ export const forgotPassword = catchAsync(async (req, res) => {
  * @route POST /api/v1/users/reset-password/:token
  */
 export const resetPassword = catchAsync(async (req, res) => {
+  const { token } = req.params;
   const { password } = req.body;
 
-  if (!password) {
-    throw new AppError("Please provide a new password", 400);
-  }
-
-  // 1. Hash the token from URL
-  const hashedToken = crypto
-    .createHash("sha256")
-    .update(req.params.token)
-    .digest("hex");
-
-  // 2. Find user with valid token and not expired
+  // Get user by reset token
   const user = await User.findOne({
-    resetPasswordToken: hashedToken,
-    resetPasswordExpire: { $gt: Date.now() }
+    resetPasswordToken: crypto.createHash("sha256").update(token).digest("hex"),
+    resetPasswordExpire: { $gt: Date.now() },
   });
 
   if (!user) {
-    throw new AppError("Token is invalid or has expired", 400);
+    throw new AppError("Invalid or expired reset token", 400);
   }
 
-  // 3. Set new password
+  // Update password and clear reset token
   user.password = password;
-
-  // 4. Clear reset fields
   user.resetPasswordToken = undefined;
   user.resetPasswordExpire = undefined;
-
-  // 5. Save user (triggers password hashing)
   await user.save();
 
   res.status(200).json({
     success: true,
-    message: "Password has been reset successfully"
+    message: "Password reset successful",
   });
 });
-
 
 /**
  * Delete user account
  * @route DELETE /api/v1/users/account
  */
 export const deleteUserAccount = catchAsync(async (req, res) => {
-  // TODO: Implement delete user account functionality
+  const user = await User.findById(req.id);
+
+  // Delete avatar if not default
+  if (user.avatar && user.avatar !== "default-avatar.png") {
+    await deleteMediaFromCloudinary(user.avatar);
+  }
+
+  // Delete user
   await User.findByIdAndDelete(req.id);
-  
-  res.cookie("token", "", {
-    httpOnly: true,
-    expires: new Date(0),
-  });
+
+  res.cookie("token", "", { maxAge: 0 });
   res.status(200).json({
     success: true,
-    message: "User account deleted successfully",
+    message: "Account deleted successfully",
   });
 });
